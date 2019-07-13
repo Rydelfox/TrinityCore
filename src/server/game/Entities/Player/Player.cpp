@@ -95,6 +95,18 @@
 #include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#ifdef ELUNA
+#include "LuaEngine.h"
+#endif
+
+#include "Config.h"
+
+//npcbot
+#include "botmgr.h"
+//end npcbot
+// Playerbot mod:
+#include "../../../../plugins/playerbot/playerbot.h"
+#include "../../../../plugins/playerbot/GuildTaskMgr.h"
 
 #define ZONE_UPDATE_INTERVAL (1*IN_MILLISECONDS)
 
@@ -384,6 +396,11 @@ Player::Player(WorldSession* session): Unit(true)
     m_timeSyncClient = 0;
     m_timeSyncServer = 0;
 
+    /////////////// NpcBot System //////////////////
+    _botMgr = NULL;
+    ///////////// End Bot System ////////////////
+
+
     for (uint8 i = 0; i < MAX_POWERS; ++i)
         m_powerFraction[i] = 0;
 
@@ -405,6 +422,10 @@ Player::Player(WorldSession* session): Unit(true)
 
     m_achievementMgr = new AchievementMgr(this);
     m_reputationMgr = new ReputationMgr(this);
+
+    // playerbot mod
+    m_playerbotAI = NULL;
+    m_playerbotMgr = NULL;
 }
 
 Player::~Player()
@@ -443,6 +464,13 @@ Player::~Player()
     delete m_achievementMgr;
     delete m_reputationMgr;
     delete _cinematicMgr;
+    //npcbot
+    if (_botMgr)
+    {
+        delete _botMgr;
+        _botMgr = NULL;
+    }
+    //end npcbot
 
     sWorld->DecreasePlayerCount();
 }
@@ -1382,6 +1410,15 @@ void Player::Update(uint32 p_time)
     if (IsHasDelayedTeleport() && IsAlive())
         TeleportTo(m_teleport_dest, m_teleport_options);
 
+    //NpcBot mod: Update
+    if (_botMgr)
+        _botMgr->Update(p_time);
+    //end Npcbot
+    // Playerbot mod
+    if (m_playerbotAI)
+       m_playerbotAI->UpdateAI(p_time);
+    if (m_playerbotMgr)
+       m_playerbotMgr->UpdateAI(p_time);
 }
 
 void Player::setDeathState(DeathState s)
@@ -1803,6 +1840,10 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
             // remove pet on map change
             if (pet)
                 UnsummonPetTemporaryIfAny();
+            //npcbot: teleport npcbots
+            if (HaveBot())
+                _botMgr->OnTeleportFar(mapid, x, y, z, orientation);
+            //end npcbot
 
             // remove all dyn objects
             RemoveAllDynObjects();
@@ -1975,6 +2016,37 @@ void Player::RemoveFromWorld()
         }
     }
 }
+//NpcBOT
+bool Player::HaveBot() const
+{
+    return _botMgr && _botMgr->HaveBot();
+}
+
+uint8 Player::GetNpcBotsCount(bool inWorldOnly) const
+{
+    return HaveBot() ? _botMgr->GetNpcBotsCount(inWorldOnly) : 0;
+}
+
+uint8 Player::GetBotFollowDist() const
+{
+    return _botMgr ? _botMgr->GetBotFollowDist() : 30;
+}
+
+void Player::SetBotFollowDist(int8 dist)
+{
+    if (_botMgr) _botMgr->SetBotFollowDist(dist);
+}
+
+void Player::SetBotsShouldUpdateStats()
+{
+    if (HaveBot()) _botMgr->SetBotsShouldUpdateStats();
+}
+
+void Player::RemoveAllBots(uint8 removetype)
+{
+    if (HaveBot()) _botMgr->RemoveAllBots(removetype);
+}
+//END BOT
 
 void Player::SetObjectScale(float scale)
 {
@@ -2264,6 +2336,11 @@ Creature* Player::GetNPCIfCanInteractWith(ObjectGuid const& guid, uint32 npcflag
     if (creature->GetCharmerGUID())
         return nullptr;
 
+	//npcbot
+	if ((creature->IsQuestBot() || creature->IsNPCBot()) && creature->IsWithinDistInMap(this, INTERACTION_DISTANCE))
+		return creature;
+	//end npcbot
+
     // not unfriendly/hostile
     if (creature->GetReactionTo(this) <= REP_UNFRIENDLY)
         return nullptr;
@@ -2495,7 +2572,38 @@ void Player::RemoveFromGroup(Group* group, ObjectGuid guid, RemoveMethod method 
 {
     if (!group)
         return;
+    //npcbot - player is being removed from group - remove bots from that group
+    if (Player* player = ObjectAccessor::FindPlayer(guid))
+    {
+        if (player->HaveBot())
+        {
+            uint8 players = 0;
+            Group::MemberSlotList const& members = group->GetMemberSlots();
+            for (Group::member_citerator itr = members.begin(); itr!= members.end(); ++itr)
+            {
+                if (ObjectAccessor::FindPlayer(itr->guid))
+                    ++players;
+            }
 
+            //remove npcbots and set up new group if needed
+            player->GetBotMgr()->RemoveAllBotsFromGroup(players > 1);
+            group = player->GetGroup();
+            if (!group)
+                return; //group has been disbanded
+        }
+    }
+    //npcbot - bot is being removed from group - find master and remove bot through botmap
+    /*else if (Creature* bot = ObjectAccessor::GetObjectInOrOutOfWorld(guid, (Creature*)NULL))
+    {
+        Player* master = bot->GetBotOwner();
+        if (master && master->GetTypeId() == TYPEID_PLAYER) //check for free bot just in case
+        {
+            master->GetBotMgr()->RemoveBotFromGroup(bot);
+            group = NULL;
+            return;
+        }
+    }*/
+    //end npcbot
     group->RemoveMember(guid, method, kicker, reason);
 }
 
@@ -4381,7 +4489,13 @@ void Player::DeleteFromDB(ObjectGuid playerguid, uint32 accountId, bool updateRe
             stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_CHAR_FISHINGSTEPS);
             stmt->setUInt32(0, guid);
             trans->Append(stmt);
-
+            //npcbot - erase npcbots
+            stmt = CharacterDatabase.GetPreparedStatement(CHAR_UPD_NPCBOT_OWNER_ALL);
+            //"UPDATE characters_npcbot SET owner = ? WHERE owner = ?", CONNECTION_ASYNC
+            stmt->setUInt32(0, uint32(0));
+            stmt->setUInt32(1, guid);
+            trans->Append(stmt);
+            //end npcbot
             Corpse::DeleteFromDB(playerguid, trans);
             break;
         }
@@ -4586,6 +4700,9 @@ void Player::ResurrectPlayer(float restore_percent, bool applySickness)
     // recast lost by death auras of any items held in the inventory
     CastAllObtainSpells();
 
+#ifdef ELUNA
+    sEluna->OnResurrect(this);
+#endif
     if (!applySickness)
         return;
 
@@ -6786,6 +6903,10 @@ bool Player::RewardHonor(Unit* victim, uint32 groupsize, int32 honor, bool pvpto
         }
         else
         {
+            //npcbot - honor for bots
+            if (!(victim->ToCreature()->GetIAmABot() && victim->ToCreature()->IsFreeBot())) //exclude pets
+            //TODO: honor rate
+            //end npcbot
             if (!victim->ToCreature()->IsRacialLeader())
                 return false;
 
@@ -11679,6 +11800,12 @@ InventoryResult Player::CanUseItem(ItemTemplate const* proto) const
         if (HasSpell(proto->Spells[1].SpellId))
             return EQUIP_ERR_NONE;
 
+#ifdef ELUNA
+    InventoryResult eres = sEluna->OnCanUseItem(this, proto->ItemId);
+    if (eres != EQUIP_ERR_OK)
+        return eres;
+#endif
+
     return EQUIP_ERR_OK;
 }
 
@@ -12098,6 +12225,9 @@ Item* Player::EquipItem(uint16 pos, Item* pItem, bool update)
 
         ApplyEquipCooldown(pItem2);
 
+#ifdef ELUNA
+        sEluna->OnEquip(this, pItem2, bag, slot);
+#endif
         return pItem2;
     }
 
@@ -12108,6 +12238,9 @@ Item* Player::EquipItem(uint16 pos, Item* pItem, bool update)
     UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_EQUIP_ITEM, pItem->GetEntry());
     UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_EQUIP_EPIC_ITEM, slot, pItem->GetEntry());
 
+#ifdef ELUNA
+        sEluna->OnEquip(this, pItem, bag, slot);
+#endif
     return pItem;
 }
 
@@ -12132,6 +12265,10 @@ void Player::QuickEquipItem(uint16 pos, Item* pItem)
 
         UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_EQUIP_ITEM, pItem->GetEntry());
         UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_EQUIP_EPIC_ITEM, slot, pItem->GetEntry());
+
+#ifdef ELUNA
+        sEluna->OnEquip(this, pItem, (pos >> 8), slot);
+#endif
     }
 }
 
@@ -14786,6 +14923,9 @@ void Player::AddQuestAndCheckCompletion(Quest const* quest, Object* questGiver)
     {
         case TYPEID_UNIT:
             PlayerTalkClass->ClearMenus();
+#ifdef ELUNA
+            sEluna->OnQuestAccept(this, questGiver->ToCreature(), quest);
+#endif
             questGiver->ToCreature()->AI()->QuestAccept(this, quest);
             break;
         case TYPEID_ITEM:
@@ -14812,6 +14952,9 @@ void Player::AddQuestAndCheckCompletion(Quest const* quest, Object* questGiver)
         }
         case TYPEID_GAMEOBJECT:
             PlayerTalkClass->ClearMenus();
+#ifdef ELUNA
+            sEluna->OnQuestAccept(this, questGiver->ToGameObject(), quest);
+#endif
             questGiver->ToGameObject()->AI()->QuestAccept(this, quest);
             break;
         default:
@@ -15871,6 +16014,10 @@ QuestGiverStatus Player::GetQuestDialogStatus(Object* questgiver)
         case TYPEID_GAMEOBJECT:
         {
             QuestGiverStatus questStatus = QuestGiverStatus(questgiver->ToGameObject()->AI()->GetDialogStatus(this));
+#ifdef ELUNA
+            if (uint32 dialogid = sEluna->GetDialogStatus(this, questgiver->ToGameObject()))
+                questStatus = static_cast<QuestGiverStatus>(dialogid);
+#endif
             if (questStatus != DIALOG_STATUS_SCRIPTED_NO_STATUS)
                 return questStatus;
             qr = sObjectMgr->GetGOQuestRelationBounds(questgiver->GetEntry());
@@ -15880,6 +16027,10 @@ QuestGiverStatus Player::GetQuestDialogStatus(Object* questgiver)
         case TYPEID_UNIT:
         {
             QuestGiverStatus questStatus = QuestGiverStatus(questgiver->ToCreature()->AI()->GetDialogStatus(this));
+#ifdef ELUNA
+            if (uint32 dialogid = sEluna->GetDialogStatus(this, questgiver->ToCreature()))
+                questStatus = static_cast<QuestGiverStatus>(dialogid);
+#endif
             if (questStatus != DIALOG_STATUS_SCRIPTED_NO_STATUS)
                 return questStatus;
             qr = sObjectMgr->GetCreatureQuestRelationBounds(questgiver->GetEntry());
@@ -17976,8 +18127,8 @@ void Player::_LoadInventory(PreparedQueryResult result, uint32 timeDiff)
                     item->SetState(ITEM_UNCHANGED, this);
                 else
                 {
-                    TC_LOG_ERROR("entities.player", "Player::_LoadInventory: Player '%s' (%s) has item (%s, entry: %u) which can't be loaded into inventory (Bag %u, slot: %u) by reason %u. Item will be sent by mail.",
-                        GetName().c_str(), GetGUID().ToString().c_str(), item->GetGUID().ToString().c_str(), item->GetEntry(), bagGuid, slot, uint32(err));
+                    //TC_LOG_ERROR("entities.player", "Player::_LoadInventory: Player '%s' (%s) has item (%s, entry: %u) which can't be loaded into inventory (Bag %u, slot: %u) by reason %u. Item will be sent by mail.",
+                    //    GetName().c_str(), GetGUID().ToString().c_str(), item->GetGUID().ToString().c_str(), item->GetEntry(), bagGuid, slot, uint32(err));
                     item->DeleteFromInventoryDB(trans);
                     problematicItems.push_back(item);
                 }
@@ -23668,6 +23819,9 @@ bool Player::GetsRecruitAFriendBonus(bool forXP)
 void Player::RewardPlayerAndGroupAtKill(Unit* victim, bool isBattleGround)
 {
     KillRewarder(this, victim, isBattleGround).Reward();
+    // playerbot mod
+    sGuildTaskMgr.CheckKillTask(this, victim);
+    // end of playerbot mod
 }
 
 void Player::RewardPlayerAndGroupAtEvent(uint32 creature_id, WorldObject* pRewardSource)
@@ -24619,6 +24773,9 @@ void Player::StoreLootItem(uint8 lootSlot, Loot* loot)
         if (loot->containerID > 0)
             sLootItemStorage->RemoveStoredLootItemForContainer(loot->containerID, item->itemid, item->count);
 
+#ifdef ELUNA
+        sEluna->OnLootItem(this, newitem, item->count, this->GetLootGUID());
+#endif
     }
     else
         SendEquipError(msg, nullptr, nullptr, item->itemid);
@@ -25041,6 +25198,10 @@ void Player::LearnTalent(uint32 talentId, uint32 talentRank)
 
     // update free talent points
     SetFreeTalentPoints(CurTalentPoints - (talentRank - curtalent_maxrank + 1));
+
+#ifdef ELUNA
+    sEluna->OnLearnTalents(this, talentId, talentRank, spellid);
+#endif
 }
 
 void Player::LearnPetTalent(ObjectGuid petGuid, uint32 talentId, uint32 talentRank)

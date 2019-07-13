@@ -48,6 +48,9 @@
 #include "World.h"
 #include "WorldSocket.h"
 #include "WorldSocketMgr.h"
+#ifdef ELUNA
+#include "LuaEngine.h"
+#endif
 #include <openssl/opensslv.h>
 #include <openssl/crypto.h>
 #include <boost/asio/io_service.hpp>
@@ -62,7 +65,7 @@ using namespace boost::program_options;
 namespace fs = boost::filesystem;
 
 #ifndef _TRINITY_CORE_CONFIG
-    #define _TRINITY_CORE_CONFIG  "worldserver.conf"
+    #define _TRINITY_CORE_CONFIG  "Settings/server_world.conf"
 #endif
 
 #define WORLD_SLEEP_CONST 50
@@ -253,6 +256,9 @@ extern int main(int argc, char** argv)
         sInstanceSaveMgr->Unload();
         sOutdoorPvPMgr->Die();                     // unload it before MapManager
         sMapMgr->UnloadAll();                      // unload all grids (including locked in memory)
+#ifdef ELUNA
+        Eluna::Uninitialize();
+#endif
     });
 
     // Start the Remote Access port (acceptor) if enabled

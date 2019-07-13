@@ -36,6 +36,10 @@
 #include "Player.h"
 #include "TemporarySummon.h"
 #include "Totem.h"
+#ifdef ELUNA
+#include "LuaEngine.h"
+#include "ElunaEventMgr.h"
+#endif
 #include "Transport.h"
 #include "Unit.h"
 #include "UpdateFieldFlags.h"
@@ -61,6 +65,11 @@ Object::Object() : m_PackGUID(sizeof(uint64)+1)
 
 WorldObject::~WorldObject()
 {
+#ifdef ELUNA
+    delete elunaEvents;
+    elunaEvents = NULL;
+#endif
+
     // this may happen because there are many !create/delete
     if (IsWorldObject() && m_currMap)
     {
@@ -1027,6 +1036,9 @@ void MovementInfo::OutDebug()
 }
 
 WorldObject::WorldObject(bool isWorldObject) : WorldLocation(), LastUsedScriptID(0),
+#ifdef ELUNA
+elunaEvents(NULL),
+#endif
 m_name(""), m_isActive(false), m_isWorldObject(isWorldObject), m_zoneScript(nullptr),
 m_transport(nullptr), m_zoneId(0), m_areaId(0), m_staticFloorZ(VMAP_INVALID_HEIGHT), m_currMap(nullptr), m_InstanceId(0),
 m_phaseMask(PHASEMASK_NORMAL), m_notifyflags(0)
@@ -1061,6 +1073,10 @@ void WorldObject::setActive(bool on)
 
     if (GetTypeId() == TYPEID_PLAYER)
         return;
+    //npcbot
+    if (on == false && GetTypeId() == TYPEID_UNIT && ToCreature()->IsNPCBot())
+        return;
+    //end npcbot
 
     m_isActive = on;
 
@@ -1094,6 +1110,13 @@ void WorldObject::CleanupsBeforeDelete(bool /*finalCleanup*/)
 
     if (Transport* transport = GetTransport())
         transport->RemovePassenger(this);
+}
+
+void WorldObject::Update (uint32 time_diff)
+{
+#ifdef ELUNA
+    elunaEvents->Update(time_diff);
+#endif
 }
 
 void WorldObject::_Create(ObjectGuid::LowType guidlow, HighGuid guidhigh, uint32 phaseMask)
@@ -1833,6 +1856,13 @@ void WorldObject::SetMap(Map* map)
     m_currMap = map;
     m_mapId = map->GetId();
     m_InstanceId = map->GetInstanceId();
+
+#ifdef ELUNA
+    delete elunaEvents;
+    // On multithread replace this with a pointer to map's Eluna pointer stored in a map
+    elunaEvents = new ElunaEventProcessor(&Eluna::GEluna, this);
+#endif
+
     if (IsWorldObject())
         m_currMap->AddWorldObject(this);
 }
@@ -1843,6 +1873,12 @@ void WorldObject::ResetMap()
     ASSERT(!IsInWorld());
     if (IsWorldObject())
         m_currMap->RemoveWorldObject(this);
+
+#ifdef ELUNA
+    delete elunaEvents;
+    elunaEvents = NULL;
+#endif
+
     m_currMap = nullptr;
     //maybe not for corpse
     //m_mapId = 0;
@@ -1936,6 +1972,11 @@ TempSummon* Map::SummonCreature(uint32 entry, Position const& pos, SummonPropert
             summon = new Puppet(properties, summoner);
             break;
         case UNIT_MASK_TOTEM:
+            //npcbot: totem emul step 1
+            if (summoner && summoner->GetTypeId() == TYPEID_UNIT && summoner->ToCreature()->GetIAmABot())
+                summon = new Totem(properties, summoner->ToCreature()->GetBotOwner());
+            else
+            //end npcbot
             summon = new Totem(properties, summoner);
             break;
         case UNIT_MASK_MINION:
@@ -1956,7 +1997,11 @@ TempSummon* Map::SummonCreature(uint32 entry, Position const& pos, SummonPropert
     summon->InitStats(duration);
     AddToMap(summon->ToCreature());
     summon->InitSummon();
-
+    //npcbot: totem emul step 2
+    //if (mask == UNIT_MASK_TOTEM)
+        if (summoner && summoner->GetTypeId() == TYPEID_UNIT && summoner->ToCreature()->GetIAmABot())
+            summoner->ToCreature()->OnBotSummon(summon);
+    //end npcbot
     // call MoveInLineOfSight for nearby creatures
     Trinity::AIRelocationNotifier notifier(*summon);
     Cell::VisitAllObjects(summon, notifier, GetVisibilityRange());
@@ -2250,6 +2295,12 @@ void WorldObject::GetContactPoint(WorldObject const* obj, float& x, float& y, fl
     // angle to face `obj` to `this` using distance includes size of `obj`
     GetNearPoint(obj, x, y, z, obj->GetCombatReach(), distance2d, GetAngle(obj));
 }
+//npcbot
+float WorldObject::GetObjectSize() const
+{
+    return (m_valuesCount > UNIT_FIELD_COMBATREACH) ? m_floatValues[UNIT_FIELD_COMBATREACH] : DEFAULT_PLAYER_BOUNDING_RADIUS;
+}
+//end npcbot
 
 void WorldObject::MovePosition(Position &pos, float dist, float angle)
 {

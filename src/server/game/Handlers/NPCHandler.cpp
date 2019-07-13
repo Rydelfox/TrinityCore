@@ -37,6 +37,9 @@
 #include "ReputationMgr.h"
 #include "ScriptMgr.h"
 #include "SpellInfo.h"
+#ifdef ELUNA
+#include "LuaEngine.h"
+#endif
 #include "SpellMgr.h"
 #include "World.h"
 #include "WorldPacket.h"
@@ -338,13 +341,18 @@ void WorldSession::HandleGossipHelloOpcode(WorldPacket& recvData)
             return;
         }
     }
-
     _player->PlayerTalkClass->ClearMenus();
-    if (!unit->AI()->GossipHello(_player))
+#ifdef ELUNA
+    if (!sEluna->OnGossipHello(_player, unit))
+#endif
+    if (!sScriptMgr->OnGossipHello(_player, unit))
     {
-//        _player->TalkedToCreature(unit->GetEntry(), unit->GetGUID());
-        _player->PrepareGossipMenu(unit, unit->GetCreatureTemplate()->GossipMenuId, true);
-        _player->SendPreparedGossip(unit);
+        if (!unit->AI()->GossipHello(_player))
+        {
+    //        _player->TalkedToCreature(unit->GetEntry(), unit->GetGUID());
+            _player->PrepareGossipMenu(unit, unit->GetCreatureTemplate()->GossipMenuId, true);
+            _player->SendPreparedGossip(unit);
+        }
     }
 }
 

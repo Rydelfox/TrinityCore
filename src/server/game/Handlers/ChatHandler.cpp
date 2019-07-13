@@ -38,8 +38,14 @@
 #include "ScriptMgr.h"
 #include "SpellAuraEffects.h"
 #include "Util.h"
+#ifdef ELUNA
+#include "LuaEngine.h"
+#endif
 #include "World.h"
 #include "WorldPacket.h"
+
+// Playerbot mod
+#include "../../plugins/playerbot/playerbot.h"
 
 void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
 {
@@ -256,6 +262,11 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 return;
             }
 
+#ifdef ELUNA
+            if (!sEluna->OnChat(sender, type, lang, msg))
+                return;
+#endif
+
             sender->Say(msg, Language(lang));
             break;
         }
@@ -271,6 +282,11 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 return;
             }
 
+#ifdef ELUNA
+            if (!sEluna->OnChat(sender, type, LANG_UNIVERSAL, msg))
+                return;
+#endif
+
             sender->TextEmote(msg);
             break;
         }
@@ -285,6 +301,11 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 SendNotification(GetTrinityString(LANG_SAY_REQ), sWorld->getIntConfig(CONFIG_CHAT_YELL_LEVEL_REQ));
                 return;
             }
+
+#ifdef ELUNA
+            if (!sEluna->OnChat(sender, type, lang, msg))
+                return;
+#endif
 
             sender->Yell(msg, Language(lang));
             break;
@@ -327,7 +348,23 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 (HasPermission(rbac::RBAC_PERM_CAN_FILTER_WHISPERS) && !sender->isAcceptWhispers() && !sender->IsInWhisperWhiteList(receiver->GetGUID())))
                 sender->AddWhisperWhiteList(receiver->GetGUID());
 
-            GetPlayer()->Whisper(msg, Language(lang), receiver);
+#ifdef ELUNA
+            if (!sEluna->OnChat(GetPlayer(), type, lang, msg, receiver))
+                return;
+#endif
+
+             // Playerbot mod: handle whispered command to bot
+             if (receiver->GetPlayerbotAI() && lang != LANG_ADDON)
+             {
+                 receiver->GetPlayerbotAI()->HandleCommand(type, msg, *GetPlayer());
+                 receiver->m_speakTime = 0;
+                 receiver->m_speakCount = 0;
+             }
+             else
+             {
+                 GetPlayer()->Whisper(msg, Language(lang), receiver);
+             }
+             // END Playerbot mod
             break;
         }
         case CHAT_MSG_PARTY:
@@ -344,8 +381,23 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
 
             if (type == CHAT_MSG_PARTY_LEADER && !group->IsLeader(sender->GetGUID()))
                 return;
-
+            // Playerbot mod: broadcast message to bot members
+            for(GroupReference* itr = group->GetFirstMember(); itr != NULL; itr=itr->next())
+            {
+                Player* player = itr->GetSource();
+                if (player && player->GetPlayerbotAI() && lang != LANG_ADDON)
+                {
+                    player->GetPlayerbotAI()->HandleCommand(type, msg, *GetPlayer());
+                    GetPlayer()->m_speakTime = 0;
+                    GetPlayer()->m_speakCount = 0;
+                }
+            }
+            // END Playerbot mod
             sScriptMgr->OnPlayerChat(GetPlayer(), type, lang, msg, group);
+#ifdef ELUNA
+            if(!sEluna->OnChat(sender, type, lang, msg, group))
+                return;
+#endif
 
             WorldPacket data;
             ChatHandler::BuildChatPacket(data, ChatMsg(type), Language(lang), sender, nullptr, msg);
@@ -359,9 +411,25 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 if (Guild* guild = sGuildMgr->GetGuildById(GetPlayer()->GetGuildId()))
                 {
                     sScriptMgr->OnPlayerChat(GetPlayer(), type, lang, msg, guild);
+#ifdef ELUNA
+                    if(!sEluna->OnChat(sender, type, lang, msg, guild))
+                        return;
+#endif
 
                     guild->BroadcastToGuild(this, false, msg, lang == LANG_ADDON ? LANG_ADDON : LANG_UNIVERSAL);
                 }
+                // Playerbot mod: broadcast message to bot members
+                PlayerbotMgr *mgr = GetPlayer()->GetPlayerbotMgr();
+                if (mgr && lang != LANG_ADDON)
+                {
+                    for (PlayerBotMap::const_iterator it = mgr->GetPlayerBotsBegin(); it != mgr->GetPlayerBotsEnd(); ++it)
+                    {
+                        Player* const bot = it->second;
+                        if (bot->GetGuildId() == GetPlayer()->GetGuildId())
+                            bot->GetPlayerbotAI()->HandleCommand(type, msg, *GetPlayer());
+                    }
+                }
+                // END Playerbot mod
             }
             break;
         }
@@ -372,6 +440,10 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 if (Guild* guild = sGuildMgr->GetGuildById(GetPlayer()->GetGuildId()))
                 {
                     sScriptMgr->OnPlayerChat(GetPlayer(), type, lang, msg, guild);
+#ifdef ELUNA
+                    if(!sEluna->OnChat(sender, type, lang, msg, guild))
+                        return;
+#endif
 
                     guild->BroadcastToGuild(this, true, msg, lang == LANG_ADDON ? LANG_ADDON : LANG_UNIVERSAL);
                 }
@@ -388,8 +460,24 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 if (!group || group->isBGGroup() || !group->isRaidGroup())
                     return;
             }
+            // Playerbot mod: broadcast message to bot members
+            for(GroupReference* itr = group->GetFirstMember(); itr != NULL; itr=itr->next())
+            {
+                Player* player = itr->GetSource();
+                if (player && player->GetPlayerbotAI() && lang != LANG_ADDON)
+                {
+                    player->GetPlayerbotAI()->HandleCommand(type, msg, *GetPlayer());
+                    GetPlayer()->m_speakTime = 0;
+                    GetPlayer()->m_speakCount = 0;
+                }
+            }
+            // END Playerbot mod
 
             sScriptMgr->OnPlayerChat(GetPlayer(), type, lang, msg, group);
+#ifdef ELUNA
+            if(!sEluna->OnChat(sender, type, lang, msg, group))
+                return;
+#endif
 
             WorldPacket data;
             ChatHandler::BuildChatPacket(data, CHAT_MSG_RAID, Language(lang), sender, nullptr, msg);
@@ -406,8 +494,23 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 if (!group || group->isBGGroup() || !group->isRaidGroup() || !group->IsLeader(sender->GetGUID()))
                     return;
             }
-
+            // Playerbot mod: broadcast message to bot members
+            for(GroupReference* itr = group->GetFirstMember(); itr != NULL; itr=itr->next())
+            {
+                Player* player = itr->GetSource();
+                if (player && player->GetPlayerbotAI() && lang != LANG_ADDON)
+                {
+                    player->GetPlayerbotAI()->HandleCommand(type, msg, *GetPlayer());
+                    GetPlayer()->m_speakTime = 0;
+                    GetPlayer()->m_speakCount = 0;
+                }
+            }
+            // END Playerbot mod
             sScriptMgr->OnPlayerChat(GetPlayer(), type, lang, msg, group);
+#ifdef ELUNA
+            if(!sEluna->OnChat(sender, type, lang, msg, group))
+                return;
+#endif
 
             WorldPacket data;
             ChatHandler::BuildChatPacket(data, CHAT_MSG_RAID_LEADER, Language(lang), sender, nullptr, msg);
@@ -419,8 +522,24 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
             Group* group = GetPlayer()->GetGroup();
             if (!group || !(group->isRaidGroup() || sWorld->getBoolConfig(CONFIG_CHAT_PARTY_RAID_WARNINGS)) || !(group->IsLeader(GetPlayer()->GetGUID()) || group->IsAssistant(GetPlayer()->GetGUID())) || group->isBGGroup())
                 return;
+            // Playerbot mod: broadcast message to bot members
+            for(GroupReference* itr = group->GetFirstMember(); itr != NULL; itr=itr->next())
+            {
+                Player* player = itr->GetSource();
+                if (player && player->GetPlayerbotAI() && lang != LANG_ADDON)
+                {
+                    player->GetPlayerbotAI()->HandleCommand(type, msg, *GetPlayer());
+                    GetPlayer()->m_speakTime = 0;
+                    GetPlayer()->m_speakCount = 0;
+                }
+            }
+            // END Playerbot mod
 
             sScriptMgr->OnPlayerChat(GetPlayer(), type, lang, msg, group);
+#ifdef ELUNA
+            if(!sEluna->OnChat(sender, type, lang, msg, group))
+                return;
+#endif
 
             WorldPacket data;
             //in battleground, raid warning is sent only to players in battleground - code is ok
@@ -436,6 +555,10 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 return;
 
             sScriptMgr->OnPlayerChat(GetPlayer(), type, lang, msg, group);
+#ifdef ELUNA
+            if(!sEluna->OnChat(sender, type, lang, msg, group))
+                return;
+#endif
 
             WorldPacket data;
             ChatHandler::BuildChatPacket(data, CHAT_MSG_BATTLEGROUND, Language(lang), sender, nullptr, msg);
@@ -450,6 +573,10 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 return;
 
             sScriptMgr->OnPlayerChat(GetPlayer(), type, lang, msg, group);
+#ifdef ELUNA
+            if(!sEluna->OnChat(sender, type, lang, msg, group))
+                return;
+#endif
 
             WorldPacket data;
             ChatHandler::BuildChatPacket(data, CHAT_MSG_BATTLEGROUND_LEADER, Language(lang), sender, nullptr, msg);;
@@ -469,7 +596,18 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
 
             if (Channel* chn = ChannelMgr::GetChannelForPlayerByNamePart(channel, sender))
             {
+                // Playerbot mod: broadcast message to bot members
+                if (_player->GetPlayerbotMgr() && lang != LANG_ADDON && chn->GetFlags() & 0x18)
+                {
+                    _player->GetPlayerbotMgr()->HandleCommand(type, msg);
+                }
+                    sRandomPlayerbotMgr.HandleCommand(type, msg, *_player);
+                    // END Playerbot mod
                 sScriptMgr->OnPlayerChat(sender, type, lang, msg, chn);
+#ifdef ELUNA
+                if(!sEluna->OnChat(sender, type, lang, msg, chn))
+                    return;
+#endif
                 chn->Say(sender->GetGUID(), msg, lang);
             }
             break;
@@ -496,6 +634,10 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 }
 
                 sScriptMgr->OnPlayerChat(sender, type, lang, msg);
+#ifdef ELUNA
+                if(!sEluna->OnChat(sender, type, lang, msg))
+                    return;
+#endif
             }
             break;
         }
@@ -519,6 +661,10 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
             }
 
             sScriptMgr->OnPlayerChat(sender, type, lang, msg);
+#ifdef ELUNA
+            if(!sEluna->OnChat(sender, type, lang, msg))
+                return;
+#endif
             break;
         }
         default:

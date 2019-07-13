@@ -43,7 +43,13 @@
 #include "Transport.h"
 #include "Vehicle.h"
 #include "VMapFactory.h"
+#ifdef ELUNA
+#include "LuaEngine.h"
+#endif
 #include "World.h"
+//npcbot
+#include "botmgr.h"
+//end npcbot
 
 u_map_magic MapMagic        = { {'M','A','P','S'} };
 u_map_magic MapVersionMagic = { {'v','1','.','8'} };
@@ -3426,6 +3432,13 @@ void Map::AddObjectToRemoveList(WorldObject* obj)
 {
     ASSERT(obj->GetMapId() == GetId() && obj->GetInstanceId() == GetInstanceId());
 
+#ifdef ELUNA
+    if (Creature* creature = obj->ToCreature())
+        sEluna->OnRemove(creature);
+    else if (GameObject* gameobject = obj->ToGameObject())
+        sEluna->OnRemove(gameobject);
+#endif
+
     obj->CleanupsBeforeDelete(false);                            // remove or simplify at least cross referenced links
 
     i_objectsToRemove.insert(obj);
@@ -3525,6 +3538,21 @@ uint32 Map::GetPlayersCountExceptGMs() const
     uint32 count = 0;
     for (MapRefManager::const_iterator itr = m_mapRefManager.begin(); itr != m_mapRefManager.end(); ++itr)
         if (!itr->GetSource()->IsGameMaster())
+            //npcbot - count npcbots as group members (event if not in group)
+            if (itr->GetSource()->HaveBot() && BotMgr::LimitBots(this))
+            {
+                ++count;
+                BotMap const* botmap = itr->GetSource()->GetBotMgr()->GetBotMap();
+                for (BotMap::const_iterator itr = botmap->begin(); itr != botmap->end(); ++itr)
+                {
+                    Creature* cre = itr->second;
+                    if (!cre || !cre->IsInWorld() || cre->FindMap() != this)
+                        continue;
+                    ++count;
+                }
+            }
+            else
+            //end npcbot
             ++count;
     return count;
 }
@@ -3591,6 +3619,10 @@ void Map::AddToActive(Creature* c)
         GridCoord p = Trinity::ComputeGridCoord(x, y);
         if (getNGrid(p.x_coord, p.y_coord))
             getNGrid(p.x_coord, p.y_coord)->incUnloadActiveLock();
+        //bot
+        else if (c->GetIAmABot())
+            EnsureGridLoadedForActiveObject(Cell(Trinity::ComputeCellCoord(c->GetPositionX(), c->GetPositionY())), c);
+        //end bot
         else
         {
             GridCoord p2 = Trinity::ComputeGridCoord(c->GetPositionX(), c->GetPositionY());
@@ -3622,6 +3654,10 @@ void Map::RemoveFromActive(Creature* c)
         GridCoord p = Trinity::ComputeGridCoord(x, y);
         if (getNGrid(p.x_coord, p.y_coord))
             getNGrid(p.x_coord, p.y_coord)->decUnloadActiveLock();
+        //bot
+        else if (c->GetIAmABot())
+            EnsureGridLoaded(Cell(Trinity::ComputeCellCoord(c->GetPositionX(), c->GetPositionY())));
+        //end bot
         else
         {
             GridCoord p2 = Trinity::ComputeGridCoord(c->GetPositionX(), c->GetPositionY());
@@ -3857,17 +3893,32 @@ void InstanceMap::CreateInstanceData(bool load)
     if (i_data != nullptr)
         return;
 
-    InstanceTemplate const* mInstance = sObjectMgr->GetInstanceTemplate(GetId());
-    if (mInstance)
+    bool isElunaAI = false;
+
+#ifdef ELUNA
+    i_data = sEluna->GetInstanceData(this);
+    if (i_data)
+        isElunaAI = true;
+#endif
+
+    // if Eluna AI was fetched succesfully we should not call CreateInstanceData nor set the unused scriptID
+    if (!isElunaAI)
     {
-        i_script_id = mInstance->ScriptId;
-        i_data = sScriptMgr->CreateInstanceData(this);
+        InstanceTemplate const* mInstance = sObjectMgr->GetInstanceTemplate(GetId());
+        if (mInstance)
+        {
+            i_script_id = mInstance->ScriptId;
+            i_data = sScriptMgr->CreateInstanceData(this);
+        }
     }
 
     if (!i_data)
         return;
 
-    i_data->Initialize();
+    // use mangos behavior if we are dealing with Eluna AI
+    // initialize should then be called only if load is false
+    if (!isElunaAI || !load)
+        i_data->Initialize();
 
     if (load)
     {
@@ -3884,7 +3935,7 @@ void InstanceMap::CreateInstanceData(bool load)
             i_data->SetCompletedEncountersMask(fields[1].GetUInt32());
             if (!data.empty())
             {
-                TC_LOG_DEBUG("maps", "Loading instance data for `%s` with id %u", sObjectMgr->GetScriptName(i_script_id).c_str(), i_InstanceId);
+                TC_LOG_DEBUG("maps", "Loading instance data for `%s` with id %u", isElunaAI ? "ElunaAI" : sObjectMgr->GetScriptName(i_script_id).c_str(), i_InstanceId);
                 i_data->Load(data.c_str());
             }
         }
